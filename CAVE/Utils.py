@@ -121,6 +121,11 @@ def _ensure_chw_numpy(arr):
     # Fallback: assume CHW
     return a
 
+# Public alias for use in other modules
+def ensure_chw_numpy(arr):
+    """Public wrapper for ensuring (C,H,W) numpy arrays."""
+    return _ensure_chw_numpy(arr)
+
 
 def compute_sam(im_true, im_test, eps=1e-12, as_degrees=True):
     """

@@ -1,6 +1,8 @@
 import torch.utils.data as tud
 import argparse
+import numpy as np
 from Utils import *
+from Utils import ensure_chw_numpy
 from CAVE_Dataset import cave_dataset
 from Model import HSI_Fusion
 
@@ -102,8 +104,8 @@ for j, (LR, RGB, HR) in enumerate(loader_train):
     res_np = result.cpu().detach().numpy()
     hr_np = HR.numpy()
     # Ensure arrays are (C,H,W) using Utils helper
-    res_np = _ensure_chw_numpy(np.squeeze(res_np))
-    hr_np = _ensure_chw_numpy(np.squeeze(hr_np))
+    res_np = ensure_chw_numpy(np.squeeze(res_np))
+    hr_np = ensure_chw_numpy(np.squeeze(hr_np))
     psnr = compare_psnr(hr_np, res_np, data_range=1.0)
     sam = compute_sam(hr_np, res_np)
     ergas = compute_ergas(hr_np, res_np, scale=opt.sf)
