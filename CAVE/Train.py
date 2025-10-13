@@ -32,6 +32,7 @@ if __name__=="__main__":
     parser.add_argument("--sf", default=8, type=int, help='Scaling factor')
     parser.add_argument("--seed", default=1, type=int, help='Random seed')
     parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Kernel type')
+    parser.add_argument("--epochs", default=500, type=int, help='Total number of epochs to run')
     opt = parser.parse_args()
 
     print("Random Seed: ", opt.seed)
@@ -70,13 +71,11 @@ if __name__=="__main__":
     file_list = loadpath(file_path)
     HR_HSI, HR_MSI = prepare_data(opt.data_path, file_list, 20)
 
-    ## Load trained model
-    # Ensure checkpoint directory exists
-    os.makedirs("./Checkpoint/f8/Model", exist_ok=True)
-    initial_epoch = findLastCheckpoint(save_dir="./Checkpoint/f8/Model")
-    if initial_epoch > 0:
-        print('resuming by loading epoch %03d' % initial_epoch)
-        model = torch.load(os.path.join("./Checkpoint/f8/Model", 'model_%03d.pth' % initial_epoch))
+    ## Checkpoints and resume
+    checkpoint_dir = "./Checkpoint/f8/Model"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    last_ckpt = os.path.join(checkpoint_dir, "checkpoint_last.pth")
+    best_ckpt = os.path.join(checkpoint_dir, "model_best.pth")
 
     ## Loss function
     criterion = nn.L1Loss()
@@ -85,10 +84,58 @@ if __name__=="__main__":
     # optimizer = optim.Adam(model.parameters(), lr=0.0001, betas=(0.9, 0.999), eps=1e-8)
     # scheduler = MultiStepLR(optimizer, milestones=[], gamma=0.1)
     optimizer = optim.Adam(model.parameters(), lr=0.0003, betas=(0.9, 0.999), eps=1e-8)
-    scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95)
+
+    # Determine resume starting point
+    start_epoch = 0
+    best_loss = float("inf")
+
+    # Prefer stateful resume if available
+    if os.path.exists(last_ckpt):
+        print(f"Resuming from stateful checkpoint: {last_ckpt}")
+        state = torch.load(last_ckpt, map_location=device)
+        # Load model weights
+        if isinstance(state.get("model"), dict):
+            model.load_state_dict(state["model"], strict=False)
+        else:
+            try:
+                model = state["model"]
+            except Exception:
+                pass
+        # Load optimizer/scheduler states if present
+        if "optimizer" in state:
+            try:
+                optimizer.load_state_dict(state["optimizer"])  # type: ignore[arg-type]
+            except Exception as e:
+                print(f"[Warn] Could not load optimizer state: {e}")
+        start_epoch = int(state.get("epoch", 0)) + 1
+        best_loss = float(state.get("best_loss", best_loss))
+        # Create scheduler then load its state
+        scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95, last_epoch=start_epoch-1)
+        if "scheduler" in state:
+            try:
+                scheduler.load_state_dict(state["scheduler"])  # type: ignore[arg-type]
+            except Exception as e:
+                print(f"[Warn] Could not load scheduler state: {e}")
+    else:
+        # Otherwise, try to resume from the latest per-epoch weights
+        initial_epoch = findLastCheckpoint(save_dir=checkpoint_dir)
+        if initial_epoch > 0:
+            latest_path = os.path.join(checkpoint_dir, f'model_{initial_epoch:03d}.pth')
+            print('Resuming from latest weights: %s' % latest_path)
+            loaded = torch.load(latest_path, map_location=device)
+            if isinstance(loaded, torch.nn.Module):
+                model = loaded
+            else:
+                try:
+                    model.load_state_dict(loaded, strict=False)
+                except Exception as e:
+                    print(f"[Warn] Could not load state_dict: {e}")
+            start_epoch = initial_epoch
+        # Initialize scheduler aligned to starting epoch
+        scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95, last_epoch=start_epoch-1)
 
     ## pipline of training
-    for epoch in range(initial_epoch, 2):
+    for epoch in range(start_epoch, opt.epochs):
         model.train()
 
         dataset = cave_dataset(opt, HR_HSI, HR_MSI)
@@ -98,7 +145,7 @@ if __name__=="__main__":
         start_time = time.time()
         interrupted = False
 
-        pbar = tqdm(enumerate(loader_train), total=len(loader_train), desc=f"Epoch {epoch+1}/500", dynamic_ncols=True)
+        pbar = tqdm(enumerate(loader_train), total=len(loader_train), desc=f"Epoch {epoch+1}/{opt.epochs}", dynamic_ncols=True)
         try:
             for i, (LR, RGB, HR) in pbar:
                 LR, RGB, HR = Variable(LR).to(device), Variable(RGB).to(device), Variable(HR).to(device)
@@ -116,16 +163,37 @@ if __name__=="__main__":
                 pbar.set_postfix(loss=f"{avg_loss:.6f}", lr=f"{current_lr:.6e}")
         except KeyboardInterrupt:
             print("\n[Info] Interrupted by user. Saving checkpoint...")
-            torch.save(model, os.path.join("./Checkpoint/f8/Model", 'model_interrupt.pth'))
+            torch.save({
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "best_loss": best_loss,
+            }, os.path.join(checkpoint_dir, 'checkpoint_interrupt.pth'))
             interrupted = True
 
         # Step the scheduler at end-of-epoch (recommended order)
         scheduler.step()
 
         elapsed_time = time.time() - start_time
+        avg_loss = epoch_loss / max(1, len(loader_train))
         print('epoch = %4d , avg_loss = %.10f , time = %4.2f s , lr = %.6e' % (
-            epoch + 1, epoch_loss / max(1, len(loader_train)), elapsed_time, optimizer.param_groups[0]['lr']))
-        torch.save(model, os.path.join("./Checkpoint/f8/Model", 'model_%03d.pth' % (epoch + 1)))  # save model
+            epoch + 1, avg_loss, elapsed_time, optimizer.param_groups[0]['lr']))
+
+        # Save stateful checkpoint for resume
+        torch.save({
+            "epoch": epoch,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "best_loss": best_loss,
+        }, last_ckpt)
+
+        # Save per-epoch weights-only snapshot and best
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f'model_{epoch + 1:03d}.pth'))
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            torch.save(model.state_dict(), best_ckpt)
 
         if interrupted:
             print("[Info] Training stopped after saving interrupt checkpoint.")
