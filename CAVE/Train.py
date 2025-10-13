@@ -17,7 +17,6 @@ except ImportError:
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
 if __name__=="__main__":
@@ -33,10 +32,20 @@ if __name__=="__main__":
     parser.add_argument("--seed", default=1, type=int, help='Random seed')
     parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Kernel type')
     parser.add_argument("--epochs", default=500, type=int, help='Total number of epochs to run')
+    parser.add_argument("--gpus", default=1, type=int, help='Number of GPUs to use with DataParallel (set >1 to use multiple GPUs if available)')
     parser.add_argument("--resume", dest="resume", action="store_true", help='Auto-resume from last checkpoints in default folder if available')
     parser.set_defaults(resume=True)
     parser.add_argument("--resume_path", type=str, default="", help='Path to a .pth checkpoint to resume from (stateful or weights). Overrides auto-resume if provided.')
     opt = parser.parse_args()
+
+    # Configure visible GPUs BEFORE any cuda calls
+    if opt.gpus is not None and opt.gpus > 0:
+        # If more than one GPU requested, expose 0..gpus-1; otherwise do not restrict
+        try:
+            ids = ",".join(str(i) for i in range(opt.gpus))
+            os.environ["CUDA_VISIBLE_DEVICES"] = ids
+        except Exception:
+            pass
 
     print("Random Seed: ", opt.seed)
     torch.manual_seed(opt.seed)
@@ -50,7 +59,7 @@ if __name__=="__main__":
 
     ## set the number of parallel GPUs
     print("===> Setting GPU")
-    model = dataparallel(model, 1)
+    model = dataparallel(model, opt.gpus)
     # Resolve device from model
     try:
         device = next(model.parameters()).device
