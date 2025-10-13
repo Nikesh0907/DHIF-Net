@@ -101,9 +101,9 @@ for j, (LR, RGB, HR) in enumerate(loader_train):
         result = result.clamp(min=0., max=1.)
     res_np = result.cpu().detach().numpy()
     hr_np = HR.numpy()
-    # Ensure arrays are (C,H,W) or compatible
-    res_np = np.squeeze(res_np)
-    hr_np = np.squeeze(hr_np)
+    # Ensure arrays are (C,H,W) using Utils helper
+    res_np = _ensure_chw_numpy(np.squeeze(res_np))
+    hr_np = _ensure_chw_numpy(np.squeeze(hr_np))
     psnr = compare_psnr(hr_np, res_np, data_range=1.0)
     sam = compute_sam(hr_np, res_np)
     ergas = compute_ergas(hr_np, res_np, scale=opt.sf)

@@ -96,21 +96,30 @@ def c_ssim(im1, im2):
 
 # ---------- New metrics: SAM, ERGAS, SSIM (numpy-based) ----------
 def _ensure_chw_numpy(arr):
-    """Ensure numpy array shape is (C, H, W). Accepts (B,C,H,W), (C,H,W), or (H,W,C)."""
+    """Ensure numpy array shape is (C, H, W). Accepts (B,C,H,W), (C,H,W), or (H,W,C).
+    Uses conservative heuristics to distinguish CHW vs HWC.
+    """
     a = np.asarray(arr)
     if a.ndim == 4:
-        # Assume batch first, take first item
-        a = a[0]
+        # Prefer NCHW if channel dim small (<=64); else if NHWC with last dim small
+        if a.shape[1] <= 64:
+            a = a[0]  # NCHW -> CHW
+        elif a.shape[-1] <= 64:
+            a = np.transpose(a[0], (2, 0, 1))  # NHWC -> CHW
+        else:
+            a = a[0]
     if a.ndim != 3:
         raise ValueError(f"Expected 3D or 4D array, got shape {a.shape}")
-    # If channels last
-    if a.shape[-1] < a.shape[0]:
-        # Heuristic: if last dim is smaller than first, we still might be CHW already
-        # Check common case where first dim equals band count (e.g., 31)
+    # At this point a is 3D. Decide if CHW or HWC.
+    C, H, W = a.shape[0], a.shape[1], a.shape[2]
+    if C <= 64 and H >= 8 and W >= 8:
+        # Likely CHW already
         return a
-    else:
+    if a.shape[-1] <= 64 and a.shape[0] >= 8 and a.shape[1] >= 8:
         # HWC -> CHW
         return np.transpose(a, (2, 0, 1))
+    # Fallback: assume CHW
+    return a
 
 
 def compute_sam(im_true, im_test, eps=1e-12, as_degrees=True):
@@ -130,10 +139,11 @@ def compute_sam(im_true, im_test, eps=1e-12, as_degrees=True):
     denom = np.linalg.norm(x_flat, axis=0) * np.linalg.norm(y_flat, axis=0)
     cosang = np.clip(nom / np.maximum(denom, eps), -1.0, 1.0)
     ang = np.arccos(cosang)
+    # Mask invalid (zero vectors) to avoid skewing average
+    valid = np.isfinite(ang)
     if as_degrees:
         ang = ang / np.pi * 180.0
-    # Ignore NaNs (where both spectra were zero)
-    return np.nanmean(ang)
+    return float(np.mean(ang[valid]))
 
 
 def compute_ergas(im_true, im_test, scale=8, eps=1e-12):
@@ -151,7 +161,8 @@ def compute_ergas(im_true, im_test, scale=8, eps=1e-12):
     rmse = np.sqrt(np.mean((x - y) ** 2, axis=(1, 2)))
     mu = np.mean(x, axis=(1, 2))
     term = (rmse / np.maximum(mu, eps)) ** 2
-    ergas = 100.0 * float(scale) * np.sqrt(np.mean(term))
+    # ERGAS = 100 * (h/l) * sqrt(mean((RMSE_i / mu_i)^2)), where h/l = 1/scale
+    ergas = 100.0 * (1.0 / float(scale)) * np.sqrt(np.mean(term))
     return float(ergas)
 
 
