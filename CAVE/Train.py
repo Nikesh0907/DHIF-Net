@@ -8,6 +8,12 @@ import datetime
 import argparse
 from torch.autograd import Variable
 from Utils import *
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    # Fallback: no-op tqdm
+    def tqdm(x, **kwargs):
+        return x
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -82,30 +88,45 @@ if __name__=="__main__":
     scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95)
 
     ## pipline of training
-    for epoch in range(initial_epoch, 500):
+    for epoch in range(initial_epoch, 1):
         model.train()
 
         dataset = cave_dataset(opt, HR_HSI, HR_MSI)
         loader_train = tud.DataLoader(dataset, num_workers=1, batch_size=opt.batch_size, shuffle=True)
 
-        scheduler.step(epoch)
-        epoch_loss = 0
-
+        epoch_loss = 0.0
         start_time = time.time()
-        for i, (LR, RGB, HR) in enumerate(loader_train):
-            LR, RGB, HR = Variable(LR).to(device), Variable(RGB).to(device), Variable(HR).to(device)
-            out = model(RGB, LR)
+        interrupted = False
 
-            loss = criterion(out, HR)
-            epoch_loss += loss.item()
+        pbar = tqdm(enumerate(loader_train), total=len(loader_train), desc=f"Epoch {epoch+1}/500", dynamic_ncols=True)
+        try:
+            for i, (LR, RGB, HR) in pbar:
+                LR, RGB, HR = Variable(LR).to(device), Variable(RGB).to(device), Variable(HR).to(device)
+                out = model(RGB, LR)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            if i % 2000 == 0:
-                print('%4d %4d / %4d loss = %.10f time = %s' % (
-                    epoch + 1, i, len(dataset)// opt.batch_size, epoch_loss / ((i+1) * opt.batch_size), datetime.datetime.now()))
+                loss = criterion(out, HR)
+                epoch_loss += loss.item()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                avg_loss = epoch_loss / (i + 1)
+                current_lr = optimizer.param_groups[0]['lr']
+                pbar.set_postfix(loss=f"{avg_loss:.6f}", lr=f"{current_lr:.6e}")
+        except KeyboardInterrupt:
+            print("\n[Info] Interrupted by user. Saving checkpoint...")
+            torch.save(model, os.path.join("./Checkpoint/f8/Model", 'model_interrupt.pth'))
+            interrupted = True
+
+        # Step the scheduler at end-of-epoch (recommended order)
+        scheduler.step()
 
         elapsed_time = time.time() - start_time
-        print('epcoh = %4d , loss = %.10f , time = %4.2f s' % (epoch + 1, epoch_loss / len(dataset), elapsed_time))
+        print('epoch = %4d , avg_loss = %.10f , time = %4.2f s , lr = %.6e' % (
+            epoch + 1, epoch_loss / max(1, len(loader_train)), elapsed_time, optimizer.param_groups[0]['lr']))
         torch.save(model, os.path.join("./Checkpoint/f8/Model", 'model_%03d.pth' % (epoch + 1)))  # save model
+
+        if interrupted:
+            print("[Info] Training stopped after saving interrupt checkpoint.")
+            break
