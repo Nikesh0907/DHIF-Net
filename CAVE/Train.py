@@ -88,7 +88,7 @@ if __name__=="__main__":
     scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95)
 
     ## pipline of training
-    for epoch in range(initial_epoch, 3):
+    for epoch in range(initial_epoch, 2):
         model.train()
 
         dataset = cave_dataset(opt, HR_HSI, HR_MSI)
