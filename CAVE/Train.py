@@ -18,8 +18,8 @@ if __name__=="__main__":
 
     ## Model Config
     parser = argparse.ArgumentParser(description="PyTorch Code for HSI Fusion")
-    parser.add_argument('--data_path', default='./Data/Train/', type=str,
-                        help='Path of the training data')
+    parser.add_argument('--data_path', default='/kaggle/input/cave-dataset-2/Data/Train/', type=str,
+                        help='Path of the training data (expects HSI/ and RGB/ under this folder)')
     parser.add_argument("--sizeI", default=96, type=int, help='The image size of the training patches')
     parser.add_argument("--batch_size", default=4, type=int, help='Batch size')
     parser.add_argument("--trainset_num", default=20000, type=int, help='The number of training samples of each epoch')
@@ -52,10 +52,16 @@ if __name__=="__main__":
     ## Load training data
     key = 'Train.txt'
     file_path = opt.data_path + key
+    # Fallback: if Train.txt does not exist in the Kaggle input dataset, use the repo's default list
+    if not os.path.exists(file_path):
+        file_path = os.path.join(os.path.dirname(__file__), 'Data/Train', key)
+        print(f"Train list not found in data_path. Falling back to {file_path}")
     file_list = loadpath(file_path)
     HR_HSI, HR_MSI = prepare_data(opt.data_path, file_list, 20)
 
     ## Load trained model
+    # Ensure checkpoint directory exists
+    os.makedirs("./Checkpoint/f8/Model", exist_ok=True)
     initial_epoch = findLastCheckpoint(save_dir="./Checkpoint/f8/Model")
     if initial_epoch > 0:
         print('resuming by loading epoch %03d' % initial_epoch)

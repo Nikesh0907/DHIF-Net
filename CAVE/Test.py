@@ -9,7 +9,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 
 parser = argparse.ArgumentParser(description="PyTorch Code for HSI Fusion")
-parser.add_argument('--data_path', default='./Data/Test/', type=str, help='path of the testing data')
+parser.add_argument('--data_path', default='/kaggle/input/cave-dataset-2/Data/Test/', type=str, help='path of the testing data (expects HSI/ and RGB/ under this folder)')
 parser.add_argument("--sizeI", default=512, type=int, help='the size of trainset')
 parser.add_argument("--testset_num", default=12, type=int, help='total number of testset')
 parser.add_argument("--batch_size", default=1, type=int, help='Batch size')
@@ -21,6 +21,10 @@ print(opt)
 
 key = 'Test.txt'
 file_path = opt.data_path + key
+# Fallback to repo list if Test.txt isn't present in Kaggle dataset
+if not os.path.exists(file_path):
+    file_path = os.path.join(os.path.dirname(__file__), 'Data/Test', key)
+    print(f"Test list not found in data_path. Falling back to {file_path}")
 file_list = loadpath(file_path, shuffle=False)
 HR_HSI, HR_MSI = prepare_data(opt.data_path, file_list, 12)
 
@@ -28,7 +32,17 @@ dataset = cave_dataset(opt, HR_HSI, HR_MSI, istrain=False)
 loader_train = tud.DataLoader(dataset, batch_size=opt.batch_size)
 
 
-model = torch.load("./Checkpoint/f8/model.pth")
+# Try to load the latest checkpoint from Model directory; fallback to single file
+ckpt_dir = "./Checkpoint/f8/Model"
+ckpt_path = None
+if os.path.isdir(ckpt_dir):
+    last_epoch = findLastCheckpoint(save_dir=ckpt_dir)
+    if last_epoch > 0:
+        ckpt_path = os.path.join(ckpt_dir, f"model_{last_epoch:03d}.pth")
+if ckpt_path is None:
+    ckpt_path = "./Checkpoint/f8/model.pth"
+print(f"Loading checkpoint: {ckpt_path}")
+model = torch.load(ckpt_path)
 model = model.eval()
 model = model.cuda()
 
