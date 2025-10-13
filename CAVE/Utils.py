@@ -299,15 +299,16 @@ def dataparallel(model, ngpus, gpu0=0):
 
 def findLastCheckpoint(save_dir):
     file_list = glob.glob(os.path.join(save_dir, 'model_*.pth'))
-    if file_list:
-        epochs_exist = []
-        for file_ in file_list:
-            result = re.findall(".*model_(.*).pth.*", file_)
-            epochs_exist.append(int(result[0]))
-        initial_epoch = max(epochs_exist)
-    else:
-        initial_epoch = 0
-    return initial_epoch
+    epochs = []
+    for file_ in file_list:
+        # Only match numeric suffixes like model_001.pth
+        m = re.search(r"model_(\d+)\.pth$", os.path.basename(file_))
+        if m:
+            try:
+                epochs.append(int(m.group(1)))
+            except ValueError:
+                pass
+    return max(epochs) if epochs else 0
 
 def prepare_data(path, file_list, file_num):
     HR_HSI = np.zeros((((512,512,31,file_num))))

@@ -33,10 +33,13 @@ dataset = cave_dataset(opt, HR_HSI, HR_MSI, istrain=False)
 loader_train = tud.DataLoader(dataset, batch_size=opt.batch_size)
 
 
-# Try to load the latest checkpoint from Model directory; fallback to single file
+# Try to load best checkpoint first, then latest numeric, else single file
 ckpt_dir = "./Checkpoint/f8/Model"
 ckpt_path = None
-if os.path.isdir(ckpt_dir):
+best_path = os.path.join(ckpt_dir, "model_best.pth")
+if os.path.isfile(best_path):
+    ckpt_path = best_path
+elif os.path.isdir(ckpt_dir):
     last_epoch = findLastCheckpoint(save_dir=ckpt_dir)
     if last_epoch > 0:
         ckpt_path = os.path.join(ckpt_dir, f"model_{last_epoch:03d}.pth")
