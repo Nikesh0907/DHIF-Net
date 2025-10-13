@@ -281,7 +281,7 @@ def HT_y(y, sf, fft_BT):
 
 def dataparallel(model, ngpus, gpu0=0):
     """
-    Wrap model with DataParallel if CUDA is available and requested; otherwise run on CPU.
+    Wrap    model with DataParallel if CUDA is available and requested; otherwise run on CPU.
     This avoids hard-failing in environments without GPU (e.g., Kaggle CPU sessions).
     """
     has_cuda = torch.cuda.is_available()
