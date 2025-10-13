@@ -57,15 +57,33 @@ except TypeError:
 except Exception as e:
     print(f"Primary load attempt failed: {e}\nTrying state_dict fallback...")
 
+def _as_state_dict(obj):
+    """Extract a state_dict from various checkpoint formats."""
+    if isinstance(obj, dict):
+        # Common patterns
+        if 'model' in obj and isinstance(obj['model'], dict):
+            return obj['model']
+        if 'state_dict' in obj and isinstance(obj['state_dict'], dict):
+            return obj['state_dict']
+        # Might already be a state dict
+        return obj
+    return None
+
 if isinstance(loaded, torch.nn.Module):
+    # Full module saved
     model = loaded
 else:
-    # Assume state_dict style
+    # Build model and load weights/state
     model = HSI_Fusion(Ch=31, stages=4, sf=opt.sf)
-    state = loaded
-    if isinstance(state, dict) and 'state_dict' in state:
-        state = state['state_dict']
-    model.load_state_dict(state)
+    state = _as_state_dict(loaded)
+    if state is None:
+        raise RuntimeError("Unsupported checkpoint format: expected module or state_dict")
+    # Handle DataParallel prefixes
+    if any(k.startswith('module.') for k in state.keys()):
+        print("Stripping 'module.' prefixes from state_dict keys (DataParallel -> single GPU)")
+        state = {k[len('module.'):] if k.startswith('module.') else k: v for k, v in state.items()}
+    # Load with strict=False to be tolerant to minor differences
+    model.load_state_dict(state, strict=False)
 model = model.eval()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = model.to(device)
