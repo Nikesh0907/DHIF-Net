@@ -33,9 +33,9 @@ if __name__=="__main__":
     parser.add_argument("--seed", default=1, type=int, help='Random seed')
     parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Kernel type')
     parser.add_argument("--epochs", default=500, type=int, help='Total number of epochs to run')
-    parser.add_argument("--resume", dest="resume", action="store_true", help='Resume from last checkpoint if available')
-    parser.add_argument("--no-resume", dest="resume", action="store_false", help='Start fresh, ignore existing checkpoints')
+    parser.add_argument("--resume", dest="resume", action="store_true", help='Auto-resume from last checkpoints in default folder if available')
     parser.set_defaults(resume=True)
+    parser.add_argument("--resume_path", type=str, default="", help='Path to a .pth checkpoint to resume from (stateful or weights). Overrides auto-resume if provided.')
     opt = parser.parse_args()
 
     print("Random Seed: ", opt.seed)
@@ -92,8 +92,55 @@ if __name__=="__main__":
     start_epoch = 0
     best_loss = float("inf")
 
-    # Prefer stateful resume if available (only if resume is True)
-    if opt.resume and os.path.exists(last_ckpt):
+    scheduler = None  # will be created/loaded below
+
+    # 1) Highest priority: explicit resume_path
+    if opt.resume_path and os.path.exists(opt.resume_path):
+        print(f"Resuming from explicit path: {opt.resume_path}")
+        loaded = torch.load(opt.resume_path, map_location=device)
+        # Try stateful first (dict with model/optimizer/scheduler)
+        if isinstance(loaded, dict) and ("model" in loaded or "state_dict" in loaded):
+            state = loaded
+            # Normalize to state_dict
+            model_state = state.get("model") or state.get("state_dict") or state
+            if isinstance(model_state, dict):
+                try:
+                    model.load_state_dict(model_state, strict=False)
+                except Exception as e:
+                    print(f"[Warn] Could not load model_state from resume_path: {e}")
+            else:
+                # In rare case "model" holds a full module
+                try:
+                    model = model_state
+                except Exception:
+                    pass
+            # Optimizer/scheduler/epoch if present
+            if "optimizer" in state:
+                try:
+                    optimizer.load_state_dict(state["optimizer"])  # type: ignore[arg-type]
+                except Exception as e:
+                    print(f"[Warn] Could not load optimizer state from resume_path: {e}")
+            if "epoch" in state:
+                start_epoch = int(state["epoch"]) + 1
+            if "best_loss" in state:
+                best_loss = float(state["best_loss"]) or best_loss
+            if "scheduler" in state:
+                try:
+                    scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95)
+                    scheduler.load_state_dict(state["scheduler"])  # type: ignore[arg-type]
+                except Exception as e:
+                    print(f"[Warn] Could not load scheduler state from resume_path: {e}")
+        elif isinstance(loaded, torch.nn.Module):
+            model = loaded
+        elif isinstance(loaded, dict):
+            # Assume it's pure state_dict
+            try:
+                model.load_state_dict(loaded, strict=False)
+            except Exception as e:
+                print(f"[Warn] Could not load weights from resume_path: {e}")
+
+    # 2) Next priority: auto stateful resume (checkpoint_last.pth)
+    elif opt.resume and os.path.exists(last_ckpt):
         print(f"Resuming from stateful checkpoint: {last_ckpt}")
         state = torch.load(last_ckpt, map_location=device)
         # Load model weights
@@ -135,7 +182,12 @@ if __name__=="__main__":
                     except Exception as e:
                         print(f"[Warn] Could not load state_dict: {e}")
                 start_epoch = initial_epoch
-        # Initialize scheduler aligned to starting epoch
+        # Initialize scheduler aligned to starting epoch if not created yet
+        if scheduler is None:
+            scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95, last_epoch=start_epoch-1)
+    
+    # Final guard: ensure scheduler exists for all code paths
+    if 'scheduler' not in locals() or scheduler is None:
         scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95, last_epoch=start_epoch-1)
 
     ## pipline of training
