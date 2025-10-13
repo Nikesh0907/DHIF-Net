@@ -2,6 +2,7 @@ import torch.utils.data as tud
 import argparse
 from Utils import *
 from CAVE_Dataset import cave_dataset
+from Model import HSI_Fusion
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -42,7 +43,26 @@ if os.path.isdir(ckpt_dir):
 if ckpt_path is None:
     ckpt_path = "./Checkpoint/f8/model.pth"
 print(f"Loading checkpoint: {ckpt_path}")
-model = torch.load(ckpt_path)
+# Support PyTorch >=2.6 (weights_only default True) and older versions
+loaded = None
+try:
+    # Newer PyTorch supports weights_only flag
+    loaded = torch.load(ckpt_path, weights_only=False)
+except TypeError:
+    # Older PyTorch doesn't have weights_only
+    loaded = torch.load(ckpt_path)
+except Exception as e:
+    print(f"Primary load attempt failed: {e}\nTrying state_dict fallback...")
+
+if isinstance(loaded, torch.nn.Module):
+    model = loaded
+else:
+    # Assume state_dict style
+    model = HSI_Fusion(Ch=31, stages=4, sf=opt.sf)
+    state = loaded
+    if isinstance(state, dict) and 'state_dict' in state:
+        state = state['state_dict']
+    model.load_state_dict(state)
 model = model.eval()
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = model.to(device)
