@@ -89,15 +89,29 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = model.to(device)
 
 
-psnr_total = 0
+psnr_total = 0.0
+sam_total = 0.0
+ergas_total = 0.0
+ssim_total = 0.0
 k = 0
 for j, (LR, RGB, HR) in enumerate(loader_train):
     with torch.no_grad():
         out = model(RGB.to(device), LR.to(device))
         result = out
         result = result.clamp(min=0., max=1.)
-    psnr = compare_psnr(result.cpu().detach().numpy(), HR.numpy(), data_range=1.0)
-    psnr_total = psnr_total + psnr
+    res_np = result.cpu().detach().numpy()
+    hr_np = HR.numpy()
+    # Ensure arrays are (C,H,W) or compatible
+    res_np = np.squeeze(res_np)
+    hr_np = np.squeeze(hr_np)
+    psnr = compare_psnr(hr_np, res_np, data_range=1.0)
+    sam = compute_sam(hr_np, res_np)
+    ergas = compute_ergas(hr_np, res_np, scale=opt.sf)
+    ssim = compute_ssim(hr_np, res_np, data_range=1.0)
+    psnr_total += psnr
+    sam_total += sam
+    ergas_total += ergas
+    ssim_total += ssim
     k = k + 1
     #
     # res = result.cpu().permute(2,3,1,0).squeeze(3).numpy()
@@ -105,4 +119,7 @@ for j, (LR, RGB, HR) in enumerate(loader_train):
     # sio.savemat(save_path, {'res':res})
 
 print(k)
-print("Avg PSNR = %.4f" % (psnr_total/k))
+print("Avg PSNR  = %.4f" % (psnr_total/k))
+print("Avg SAM   = %.4f" % (sam_total/k))
+print("Avg ERGAS = %.4f" % (ergas_total/k))
+print("Avg SSIM  = %.4f" % (ssim_total/k))

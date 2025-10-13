@@ -11,6 +11,11 @@ import Pypher
 import random
 import re
 import math
+try:
+    # Prefer modern skimage API
+    from skimage.metrics import structural_similarity as _ssim_metric
+except Exception:
+    _ssim_metric = None
 
 
 def _as_floats(im1, im2):
@@ -87,6 +92,99 @@ def c_ssim(im1, im2):
     im1 = np.maximum(np.minimum(im1, 1.0), 0.0)
     im2 = np.maximum(np.minimum(im2, 1.0), 0.0)
     return measure.compare_ssim(im1, im2, win_size=11, data_range=1, gaussian_weights=True)
+
+
+# ---------- New metrics: SAM, ERGAS, SSIM (numpy-based) ----------
+def _ensure_chw_numpy(arr):
+    """Ensure numpy array shape is (C, H, W). Accepts (B,C,H,W), (C,H,W), or (H,W,C)."""
+    a = np.asarray(arr)
+    if a.ndim == 4:
+        # Assume batch first, take first item
+        a = a[0]
+    if a.ndim != 3:
+        raise ValueError(f"Expected 3D or 4D array, got shape {a.shape}")
+    # If channels last
+    if a.shape[-1] < a.shape[0]:
+        # Heuristic: if last dim is smaller than first, we still might be CHW already
+        # Check common case where first dim equals band count (e.g., 31)
+        return a
+    else:
+        # HWC -> CHW
+        return np.transpose(a, (2, 0, 1))
+
+
+def compute_sam(im_true, im_test, eps=1e-12, as_degrees=True):
+    """
+    Spectral Angle Mapper (per-pixel angle between spectra), averaged over all pixels.
+    Inputs can be (B,C,H,W), (C,H,W), or (H,W,C) with values typically in [0,1].
+    Returns the mean angle (degrees by default).
+    """
+    x = _ensure_chw_numpy(im_true).astype(np.float64)
+    y = _ensure_chw_numpy(im_test).astype(np.float64)
+    if x.shape != y.shape:
+        raise ValueError(f"Shape mismatch in SAM: {x.shape} vs {y.shape}")
+    C, H, W = x.shape
+    x_flat = x.reshape(C, -1)
+    y_flat = y.reshape(C, -1)
+    nom = np.sum(x_flat * y_flat, axis=0)
+    denom = np.linalg.norm(x_flat, axis=0) * np.linalg.norm(y_flat, axis=0)
+    cosang = np.clip(nom / np.maximum(denom, eps), -1.0, 1.0)
+    ang = np.arccos(cosang)
+    if as_degrees:
+        ang = ang / np.pi * 180.0
+    # Ignore NaNs (where both spectra were zero)
+    return np.nanmean(ang)
+
+
+def compute_ergas(im_true, im_test, scale=8, eps=1e-12):
+    """
+    ERGAS metric (lower is better).
+    ERGAS = 100 * (h/l) * sqrt( (1/N) * sum_i (RMSE_i / mu_i)^2 )
+    where h/l is the scale ratio (use sf for upsampling factor), N is band count.
+    """
+    x = _ensure_chw_numpy(im_true).astype(np.float64)
+    y = _ensure_chw_numpy(im_test).astype(np.float64)
+    if x.shape != y.shape:
+        raise ValueError(f"Shape mismatch in ERGAS: {x.shape} vs {y.shape}")
+    C = x.shape[0]
+    # Per-band RMSE and mean of reference
+    rmse = np.sqrt(np.mean((x - y) ** 2, axis=(1, 2)))
+    mu = np.mean(x, axis=(1, 2))
+    term = (rmse / np.maximum(mu, eps)) ** 2
+    ergas = 100.0 * float(scale) * np.sqrt(np.mean(term))
+    return float(ergas)
+
+
+def compute_ssim(im_true, im_test, data_range=1.0, gaussian_weights=True, win_size=11):
+    """
+    Mean SSIM across bands. If arrays are 2D, computes single SSIM. For hyperspectral,
+    computes SSIM per band and returns the average.
+    """
+    x = np.asarray(im_true)
+    y = np.asarray(im_test)
+    if x.shape != y.shape:
+        raise ValueError(f"Shape mismatch in SSIM: {x.shape} vs {y.shape}")
+    # 2D case
+    if x.ndim == 2:
+        if _ssim_metric is not None:
+            return float(_ssim_metric(x, y, data_range=data_range, gaussian_weights=gaussian_weights, win_size=win_size))
+        else:
+            # Fallback to deprecated API
+            return float(measure.compare_ssim(x, y, data_range=data_range, gaussian_weights=gaussian_weights, win_size=win_size))
+    # 3D or 4D
+    x_chw = _ensure_chw_numpy(x)
+    y_chw = _ensure_chw_numpy(y)
+    C = x_chw.shape[0]
+    scores = []
+    for c in range(C):
+        Xa = x_chw[c]
+        Ya = y_chw[c]
+        if _ssim_metric is not None:
+            s = _ssim_metric(Xa, Ya, data_range=data_range, gaussian_weights=gaussian_weights, win_size=win_size)
+        else:
+            s = measure.compare_ssim(Xa, Ya, data_range=data_range, gaussian_weights=gaussian_weights, win_size=win_size)
+        scores.append(float(s))
+    return float(np.mean(scores))
 
 def batch_PSNR(im_true, im_fake, data_range):
     N = im_true.size()[0]
