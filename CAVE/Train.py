@@ -33,6 +33,9 @@ if __name__=="__main__":
     parser.add_argument("--seed", default=1, type=int, help='Random seed')
     parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Kernel type')
     parser.add_argument("--epochs", default=500, type=int, help='Total number of epochs to run')
+    parser.add_argument("--resume", dest="resume", action="store_true", help='Resume from last checkpoint if available')
+    parser.add_argument("--no-resume", dest="resume", action="store_false", help='Start fresh, ignore existing checkpoints')
+    parser.set_defaults(resume=True)
     opt = parser.parse_args()
 
     print("Random Seed: ", opt.seed)
@@ -89,8 +92,8 @@ if __name__=="__main__":
     start_epoch = 0
     best_loss = float("inf")
 
-    # Prefer stateful resume if available
-    if os.path.exists(last_ckpt):
+    # Prefer stateful resume if available (only if resume is True)
+    if opt.resume and os.path.exists(last_ckpt):
         print(f"Resuming from stateful checkpoint: {last_ckpt}")
         state = torch.load(last_ckpt, map_location=device)
         # Load model weights
@@ -118,19 +121,20 @@ if __name__=="__main__":
                 print(f"[Warn] Could not load scheduler state: {e}")
     else:
         # Otherwise, try to resume from the latest per-epoch weights
-        initial_epoch = findLastCheckpoint(save_dir=checkpoint_dir)
-        if initial_epoch > 0:
-            latest_path = os.path.join(checkpoint_dir, f'model_{initial_epoch:03d}.pth')
-            print('Resuming from latest weights: %s' % latest_path)
-            loaded = torch.load(latest_path, map_location=device)
-            if isinstance(loaded, torch.nn.Module):
-                model = loaded
-            else:
-                try:
-                    model.load_state_dict(loaded, strict=False)
-                except Exception as e:
-                    print(f"[Warn] Could not load state_dict: {e}")
-            start_epoch = initial_epoch
+        if opt.resume:
+            initial_epoch = findLastCheckpoint(save_dir=checkpoint_dir)
+            if initial_epoch > 0:
+                latest_path = os.path.join(checkpoint_dir, f'model_{initial_epoch:03d}.pth')
+                print('Resuming from latest weights: %s' % latest_path)
+                loaded = torch.load(latest_path, map_location=device)
+                if isinstance(loaded, torch.nn.Module):
+                    model = loaded
+                else:
+                    try:
+                        model.load_state_dict(loaded, strict=False)
+                    except Exception as e:
+                        print(f"[Warn] Could not load state_dict: {e}")
+                start_epoch = initial_epoch
         # Initialize scheduler aligned to starting epoch
         scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95, last_epoch=start_epoch-1)
 
