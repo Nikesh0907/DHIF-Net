@@ -19,23 +19,22 @@ class cave_dataset(tud.Dataset):
         self.HR_HSI, self.HR_MSI = HR_HSI, HR_MSI
 
     def H_z(self, z, factor, fft_B):
-        f = torch.rfft(z, 2, onesided=False)
-        # -------------------complex myltiply-----------------#
+        # Use torch.fft for compatibility with newer PyTorch
+        device = z.device
         if len(z.shape) == 3:
             ch, h, w = z.shape
-            fft_B = fft_B.unsqueeze(0).repeat(ch, 1, 1, 1)
-            M = torch.cat(((f[:, :, :, 0] * fft_B[:, :, :, 0] - f[:, :, :, 1] * fft_B[:, :, :, 1]).unsqueeze(3),
-                           (f[:, :, :, 0] * fft_B[:, :, :, 1] + f[:, :, :, 1] * fft_B[:, :, :, 0]).unsqueeze(3)), 3)
-            Hz = torch.irfft(M, 2, onesided=False)
-            x = Hz[:, int(factor // 2)-1::factor, int(factor // 2)-1::factor]
+            f = torch.fft.fft2(z, dim=(-2, -1))
+            fft_B_c = torch.complex(fft_B[:, :, 0].to(device), fft_B[:, :, 1].to(device))  # [h,w]
+            M = f * fft_B_c  # broadcast over channels
+            Hz = torch.fft.ifft2(M, dim=(-2, -1)).real
+            x = Hz[:, int(factor // 2) - 1::factor, int(factor // 2) - 1::factor]
         elif len(z.shape) == 4:
             bs, ch, h, w = z.shape
-            fft_B = fft_B.unsqueeze(0).unsqueeze(0).repeat(bs, ch, 1, 1, 1)
-            M = torch.cat(
-                ((f[:, :, :, :, 0] * fft_B[:, :, :, :, 0] - f[:, :, :, :, 1] * fft_B[:, :, :, :, 1]).unsqueeze(4),
-                 (f[:, :, :, :, 0] * fft_B[:, :, :, :, 1] + f[:, :, :, :, 1] * fft_B[:, :, :, :, 0]).unsqueeze(4)), 4)
-            Hz = torch.irfft(M, 2, onesided=False)
-            x = Hz[:, :, int(factor // 2)-1::factor, int(factor // 2)-1::factor]
+            f = torch.fft.fft2(z, dim=(-2, -1))
+            fft_B_c = torch.complex(fft_B[:, :, 0].to(device), fft_B[:, :, 1].to(device)).unsqueeze(0).unsqueeze(0)  # [1,1,h,w]
+            M = f * fft_B_c
+            Hz = torch.fft.ifft2(M, dim=(-2, -1)).real
+            x = Hz[:, :, int(factor // 2) - 1::factor, int(factor // 2) - 1::factor]
         return x
 
     def __getitem__(self, index):

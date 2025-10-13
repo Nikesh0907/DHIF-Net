@@ -233,50 +233,48 @@ def para_setting(kernel_type,sf,sz,sigma):
 def H_z(z, factor, fft_B ):
     #     z  [31 , 96 , 96]
     #     ch, h, w = z.shape
-    f = torch.rfft(z, 2, onesided=False)
-    # -------------------complex myltiply-----------------#
-    if len(z.shape)==3:
-        ch , h, w = z.shape
-        fft_B = fft_B.unsqueeze(0).repeat(ch,1,1,1)
-        M = torch.cat(( (f[:,:,:,0]*fft_B[:,:,:,0]-f[:,:,:,1]*fft_B[:,:,:,1]).unsqueeze(3) ,
-                        (f[:,:,:,0]*fft_B[:,:,:,1]+f[:,:,:,1]*fft_B[:,:,:,0]).unsqueeze(3) )  ,3)
-        Hz = torch.irfft(M, 2, onesided=False)
-        x = Hz[:, int(factor//2)::factor ,int(factor//2)::factor]
-    elif len(z.shape)==4:
-        bs,ch,h,w = z.shape
-        fft_B = fft_B.unsqueeze(0).unsqueeze(0).repeat(bs,ch, 1, 1, 1)
-        M = torch.cat((  (f[:,:,:,:,0]*fft_B[:,:,:,:,0]-f[:,:,:,:,1]*fft_B[:,:,:,:,1]).unsqueeze(4) ,
-                         (f[:,:,:,:,0]*fft_B[:,:,:,:,1]+f[:,:,:,:,1]*fft_B[:,:,:,:,0]).unsqueeze(4) ), 4)
-        Hz = torch.irfft(M, 2, onesided=False)
-        x = Hz[: ,: , int(factor//2)::factor ,int(factor//2)::factor]
+    # Use torch.fft APIs (rfft/irfft deprecated)
+    device = z.device
+    if len(z.shape) == 3:
+        ch, h, w = z.shape
+        f = torch.fft.fft2(z, dim=(-2, -1))
+        fft_B_c = torch.complex(fft_B[:, :, 0].to(device), fft_B[:, :, 1].to(device))
+        M = f * fft_B_c
+        Hz = torch.fft.ifft2(M, dim=(-2, -1)).real
+        x = Hz[:, int(factor // 2)::factor, int(factor // 2)::factor]
+    elif len(z.shape) == 4:
+        bs, ch, h, w = z.shape
+        f = torch.fft.fft2(z, dim=(-2, -1))
+        fft_B_c = torch.complex(fft_B[:, :, 0].to(device), fft_B[:, :, 1].to(device)).unsqueeze(0).unsqueeze(0)
+        M = f * fft_B_c
+        Hz = torch.fft.ifft2(M, dim=(-2, -1)).real
+        x = Hz[:, :, int(factor // 2)::factor, int(factor // 2)::factor]
     return x
 
 def HT_y(y, sf, fft_BT):
+    device = y.device
     if len(y.shape) == 3:
         ch, w, h = y.shape
-        # z = torch.zeros([ch, w*sf ,h*sf])
-        # z[:,::sf, ::sf] = y
         z = F.pad(y, [0, 0, 0, 0, 0, sf * sf - 1], "constant", value=0)
         z = F.pixel_shuffle(z, upscale_factor=sf).view(1, ch, w * sf, h * sf)
 
-        f = torch.rfft(z , 2 ,onesided = False)
-        fft_BT = fft_BT.unsqueeze(0).repeat(ch, 1, 1, 1)
-        M = torch.cat(((f[:, :, :, 0] * fft_BT[:, :, :, 0] - f[:, :, :, 1] * fft_BT[:, :, :, 1]).unsqueeze(3),
-                       (f[:, :, :, 0] * fft_BT[:, :, :, 1] + f[:, :, :, 1] * fft_BT[:, :, :, 0]).unsqueeze(3)), 3)
-        Hz = torch.irfft(M, 2, onesided=False)
+        f = torch.fft.fft2(z, dim=(-2, -1))
+        fft_BT_c = torch.complex(fft_BT[:, :, 0].to(device), fft_BT[:, :, 1].to(device))
+        # broadcast fft_BT over ch as needed
+        fft_BT_c = fft_BT_c.unsqueeze(0).repeat(ch, 1, 1)
+        # Match f shape [1,ch,h,w] by unsqueeze
+        M = f * fft_BT_c.unsqueeze(0)
+        Hz = torch.fft.ifft2(M, dim=(-2, -1)).real
     elif len(y.shape) == 4:
-        bs ,ch ,w ,h = y.shape
-        # z = torch.zeros([bs ,ch ,sf*w ,sf*w])
-        # z[:,:,::sf,::sf] = y
+        bs, ch, w, h = y.shape
         z = y.view(-1, 1, w, h)
-        z = F.pad(z, [0, 0, 0, 0, 0, sf*sf-1, 0, 0], "constant", value=0)
-        z = F.pixel_shuffle(z, upscale_factor=sf).view(bs ,ch ,w*sf ,h*sf)
+        z = F.pad(z, [0, 0, 0, 0, 0, sf * sf - 1, 0, 0], "constant", value=0)
+        z = F.pixel_shuffle(z, upscale_factor=sf).view(bs, ch, w * sf, h * sf)
 
-        f = torch.rfft(z, 2, onesided=False)
-        fft_BT = fft_BT.unsqueeze(0).unsqueeze(0).repeat(bs, ch, 1, 1, 1)
-        M = torch.cat(((f[:, :, :, :, 0] * fft_BT[:, :, :, :, 0] - f[:, :, :, :, 1] * fft_BT[:, :, :, :, 1]).unsqueeze(4),
-                       (f[:, :, :, :, 0] * fft_BT[:, :, :, :, 1] + f[:, :, :, :, 1] * fft_BT[:, :, :, :, 0]).unsqueeze(4)), 4)
-        Hz = torch.irfft(M, 2, onesided=False)
+        f = torch.fft.fft2(z, dim=(-2, -1))
+        fft_BT_c = torch.complex(fft_BT[:, :, 0].to(device), fft_BT[:, :, 1].to(device)).unsqueeze(0).unsqueeze(0)
+        M = f * fft_BT_c
+        Hz = torch.fft.ifft2(M, dim=(-2, -1)).real
     return Hz
 
 def dataparallel(model, ngpus, gpu0=0):

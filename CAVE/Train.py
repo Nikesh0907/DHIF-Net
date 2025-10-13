@@ -41,6 +41,11 @@ if __name__=="__main__":
     ## set the number of parallel GPUs
     print("===> Setting GPU")
     model = dataparallel(model, 1)
+    # Resolve device from model
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     ## Initialize weight
     for layer in model.modules():
@@ -88,10 +93,10 @@ if __name__=="__main__":
 
         start_time = time.time()
         for i, (LR, RGB, HR) in enumerate(loader_train):
-            LR, RGB, HR = Variable(LR), Variable(RGB), Variable(HR)
-            out = model(RGB.cuda(), LR.cuda())
+            LR, RGB, HR = Variable(LR).to(device), Variable(RGB).to(device), Variable(HR).to(device)
+            out = model(RGB, LR)
 
-            loss = criterion(out, HR.cuda())
+            loss = criterion(out, HR)
             epoch_loss += loss.item()
 
             optimizer.zero_grad()

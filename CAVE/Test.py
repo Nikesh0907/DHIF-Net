@@ -44,14 +44,15 @@ if ckpt_path is None:
 print(f"Loading checkpoint: {ckpt_path}")
 model = torch.load(ckpt_path)
 model = model.eval()
-model = model.cuda()
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(device)
 
 
 psnr_total = 0
 k = 0
 for j, (LR, RGB, HR) in enumerate(loader_train):
     with torch.no_grad():
-        out = model(RGB.cuda(), LR.cuda())
+        out = model(RGB.to(device), LR.to(device))
         result = out
         result = result.clamp(min=0., max=1.)
     psnr = compare_psnr(result.cpu().detach().numpy(), HR.numpy(), data_range=1.0)
