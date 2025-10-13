@@ -280,19 +280,24 @@ def HT_y(y, sf, fft_BT):
     return Hz
 
 def dataparallel(model, ngpus, gpu0=0):
-    if ngpus==0:
-        assert False, "only support gpu mode"
-    gpu_list = list(range(gpu0, gpu0+ngpus))
-    assert torch.cuda.device_count() >= gpu0 + ngpus
-    if ngpus > 1:
-        if not isinstance(model, torch.nn.DataParallel):
-            model = torch.nn.DataParallel(model, gpu_list).cuda()
+    """
+    Wrap model with DataParallel if CUDA is available and requested; otherwise run on CPU.
+    This avoids hard-failing in environments without GPU (e.g., Kaggle CPU sessions).
+    """
+    has_cuda = torch.cuda.is_available()
+    if has_cuda and ngpus >= 1 and torch.cuda.device_count() >= gpu0 + ngpus:
+        gpu_list = list(range(gpu0, gpu0 + ngpus))
+        if ngpus > 1:
+            if not isinstance(model, torch.nn.DataParallel):
+                model = torch.nn.DataParallel(model, gpu_list).cuda()
+            else:
+                model = model.cuda()
         else:
-
             model = model.cuda()
-    elif ngpus == 1:
-        model = model.cuda()
-    return model
+        return model
+    else:
+        print("[Warning] CUDA not available or insufficient GPUs; running on CPU.")
+        return model.cpu()
 
 def findLastCheckpoint(save_dir):
     file_list = glob.glob(os.path.join(save_dir, 'model_*.pth'))
