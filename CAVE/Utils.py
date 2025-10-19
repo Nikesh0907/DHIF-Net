@@ -209,10 +209,11 @@ def batch_PSNR(im_true, im_fake, data_range):
     W = im_true.size()[3]
     Itrue = im_true.clone().resize_(N, C*H*W)
     Ifake = im_fake.clone().resize_(N, C*H*W)
-    mse = nn.MSELoss(reduce=False)
+    mse = nn.MSELoss(reduction='none')
     err = mse(Itrue, Ifake).sum(dim=1, keepdim=True).div_(C*H*W)
-    psnr = 10. * torch.log((data_range**2)/err) / np.log(10.)
-    return torch.mean(psnr)
+    psnr = 10.0 * torch.log10((data_range ** 2) / err)
+    return psnr.mean()
+
 
 def PSNR_GPU(im_true, im_fake):
     im_true *= 255
