@@ -1,6 +1,8 @@
 import torch.utils.data as tud
+import torch
 import argparse
 import numpy as np
+import os
 from Utils import *
 from Utils import ensure_chw_numpy
 from CAVE_Dataset import cave_dataset
@@ -19,6 +21,7 @@ parser.add_argument("--batch_size", default=1, type=int, help='Batch size')
 parser.add_argument("--sf", default=8, type=int, help='Scaling factor')
 parser.add_argument("--seed", default=1, type=int, help='Random seed')
 parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Kernel type')
+parser.add_argument("--ckpt_path", default="", type=str, help="Path to a checkpoint .pth (overrides auto selection)")
 opt = parser.parse_args()
 print(opt)
 
@@ -35,18 +38,23 @@ dataset = cave_dataset(opt, HR_HSI, HR_MSI, istrain=False)
 loader_train = tud.DataLoader(dataset, batch_size=opt.batch_size)
 
 
-# Try to load best checkpoint first, then latest numeric, else single file
+# Resolve checkpoint path: explicit --ckpt_path wins; else prefer best, then latest numeric, else legacy
 ckpt_dir = "./Checkpoint/f8/Model"
 ckpt_path = None
-best_path = os.path.join(ckpt_dir, "model_best.pth")
-if os.path.isfile(best_path):
-    ckpt_path = best_path
-elif os.path.isdir(ckpt_dir):
-    last_epoch = findLastCheckpoint(save_dir=ckpt_dir)
-    if last_epoch > 0:
-        ckpt_path = os.path.join(ckpt_dir, f"model_{last_epoch:03d}.pth")
-if ckpt_path is None:
-    ckpt_path = "./Checkpoint/f8/model.pth"
+if opt.ckpt_path:
+    if not os.path.isfile(opt.ckpt_path):
+        raise FileNotFoundError(f"--ckpt_path not found: {opt.ckpt_path}")
+    ckpt_path = opt.ckpt_path
+else:
+    best_path = os.path.join(ckpt_dir, "model_best.pth")
+    if os.path.isfile(best_path):
+        ckpt_path = best_path
+    elif os.path.isdir(ckpt_dir):
+        last_epoch = findLastCheckpoint(save_dir=ckpt_dir)
+        if last_epoch > 0:
+            ckpt_path = os.path.join(ckpt_dir, f"model_{last_epoch:03d}.pth")
+    if ckpt_path is None:
+        ckpt_path = "./Checkpoint/f8/model.pth"
 print(f"Loading checkpoint: {ckpt_path}")
 # Support PyTorch >=2.6 (weights_only default True) and older versions
 loaded = None
