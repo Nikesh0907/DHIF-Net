@@ -84,7 +84,11 @@ if __name__=="__main__":
     HR_HSI, HR_MSI = prepare_data(opt.data_path, file_list, 20)
 
     ## Checkpoints and resume
-    checkpoint_dir = "./Checkpoint/f8/Model"
+    # Make checkpoint directory depend on the chosen scale factor (sf).
+    # The repository contains different folders for different upsampling factors
+    # (for example `Checkpoint/f8` and `Checkpoint/f16`). Use `opt.sf` so the
+    # correct folder is selected when running with `--sf`.
+    checkpoint_dir = os.path.join(".", f"Checkpoint/f{opt.sf}/Model")
     os.makedirs(checkpoint_dir, exist_ok=True)
     last_ckpt = os.path.join(checkpoint_dir, "checkpoint_last.pth")
     best_ckpt = os.path.join(checkpoint_dir, "model_best.pth")
@@ -140,7 +144,17 @@ if __name__=="__main__":
                 except Exception as e:
                     print(f"[Warn] Could not load scheduler state from resume_path: {e}")
         elif isinstance(loaded, torch.nn.Module):
-            model = loaded
+            # Prefer loading the saved module's state_dict into the current
+            # model instance instead of replacing the whole object. Replacing
+            # can drop attributes (like self.B) if the saved module was
+            # created from a different code version. Fall back to replacing
+            # the model only if loading the state_dict fails.
+            try:
+                model.load_state_dict(loaded.state_dict(), strict=False)
+                print("[Info] Loaded state_dict from saved module into current model.")
+            except Exception as e:
+                print(f"[Warn] Could not load state_dict from saved module: {e}. Falling back to using the saved module object.")
+                model = loaded
         elif isinstance(loaded, dict):
             # Assume it's pure state_dict
             try:

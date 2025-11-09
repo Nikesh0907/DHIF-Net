@@ -115,6 +115,10 @@ class HSI_Fusion(nn.Module):
         self.R  = nn.Sequential(nn.Conv2d(Ch, 3, kernel_size=3, stride=1, padding=1), nn.LeakyReLU())
 
         ## The modules for learning the measurement matrix B and B^T
+        # Support only a discrete set of scale-factors implemented below.
+        # If an unsupported sf is provided, raise a clear error so the user
+        # knows which values are allowed instead of failing later with
+        # an AttributeError when self.B / self.BT are missing.
         if self.sf == 8:
             self.BT = nn.Sequential(nn.ConvTranspose2d(Ch, Ch, kernel_size=12, stride=8, padding=2), nn.LeakyReLU())
             self.B  = nn.Sequential(nn.Conv2d(Ch, Ch, kernel_size=12, stride=8, padding=2), nn.LeakyReLU())
@@ -125,6 +129,30 @@ class HSI_Fusion(nn.Module):
             self.B = nn.Sequential(nn.Conv2d(Ch, Ch, kernel_size=6, stride=4, padding=1),
                                    nn.LeakyReLU(),
                                    nn.Conv2d(Ch, Ch, kernel_size=6, stride=4, padding=1), nn.LeakyReLU())
+        elif self.sf == 32:
+            # Support sf=32 by composing five 2x upsampling stages (2^5 = 32).
+            # This keeps the same per-stage behavior as smaller sf options while
+            # avoiding changes to the existing 8 and 16 branches.
+            self.BT = nn.Sequential(
+                nn.ConvTranspose2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU(),
+                nn.ConvTranspose2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU(),
+                nn.ConvTranspose2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU(),
+                nn.ConvTranspose2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU(),
+                nn.ConvTranspose2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU()
+            )
+            self.B = nn.Sequential(
+                nn.Conv2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU(),
+                nn.Conv2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU(),
+                nn.Conv2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU(),
+                nn.Conv2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU(),
+                nn.Conv2d(Ch, Ch, kernel_size=4, stride=2, padding=1), nn.LeakyReLU()
+            )
+        else:
+            # Fail fast with a helpful message. If you want to support other
+            # scale factors, implement the corresponding self.B / self.BT
+            # module definitions here. We list the supported values explicitly
+            # so users get a clear error rather than an AttributeError later.
+            raise ValueError(f"Unsupported scale factor sf={self.sf}. Supported values: 8, 16, 32")
 
         ## Encoding blocks
         self.Encoder = Encoder()
