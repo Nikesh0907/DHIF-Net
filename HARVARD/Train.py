@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.utils.data as tud
 from torch import optim
 from torch.optim.lr_scheduler import MultiStepLR
+from torch.cuda.amp import autocast, GradScaler
 
 # Make CAVE's folder importable (re-use Model and utility functions)
 import sys
@@ -72,6 +73,12 @@ if __name__ == '__main__':
     except Exception:
         pass
 
+# Enable cuDNN autotuner to select best algorithms for your HW (speeds up convolutions)
+try:
+    torch.backends.cudnn.benchmark = True
+except Exception:
+    pass
+
     print(opt)
 
     # Model
@@ -105,11 +112,15 @@ if __name__ == '__main__':
     # Dataset uses on-the-fly loader
     dataset = harvard_dataset(opt, file_list, opt.data_path)
     # increase num_workers to speed up data loading when GPUs are available
-    # cap workers to a reasonable number so it works in constrained environments
-    max_workers = min(8, (os.cpu_count() or 4))
-    num_workers = max(1, 4 if torch.cuda.is_available() else 1)
-    num_workers = min(num_workers, max_workers)
-    loader_train = tud.DataLoader(dataset, num_workers=num_workers, batch_size=opt.batch_size, shuffle=True)
+    # choose a sensible default and cap it according to CPU count
+    cpu_count = max(1, (os.cpu_count() or 4))
+    default_workers = 8 if torch.cuda.is_available() else 2
+    max_workers = max(1, min(default_workers, cpu_count - 1))
+    num_workers = max(1, max_workers)
+    # use pinned memory and persistent workers for faster host->device transfer
+    dataloader_kwargs = dict(num_workers=num_workers, pin_memory=torch.cuda.is_available(), persistent_workers=(num_workers > 0))
+    loader_train = tud.DataLoader(dataset, batch_size=opt.batch_size, shuffle=True, **dataloader_kwargs)
+    print(f"DataLoader: num_workers={num_workers}, pin_memory={dataloader_kwargs['pin_memory']}, persistent_workers={dataloader_kwargs['persistent_workers']}")
 
     criterion = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=0.0003, betas=(0.9, 0.999), eps=1e-8)
@@ -141,6 +152,10 @@ if __name__ == '__main__':
 
     print(f"Starting training from epoch {start_epoch} to {opt.epochs}")
 
+    # AMP scaler when using CUDA
+    use_amp = torch.cuda.is_available()
+    scaler = GradScaler() if use_amp else None
+
     for epoch in range(start_epoch, opt.epochs):
         model.train()
         epoch_loss = 0.0
@@ -152,12 +167,23 @@ if __name__ == '__main__':
             RGB = RGB.to(device)
             HR = HR.to(device)
 
-            out = model(RGB, LR)
-            loss = criterion(out, HR)
+            # mixed precision forward/backward when CUDA available
+            if use_amp:
+                with autocast():
+                    out = model(RGB, LR)
+                    loss = criterion(out, HR)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+            else:
+                out = model(RGB, LR)
+                loss = criterion(out, HR)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
             epoch_loss += loss.item()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
 
             avg_loss = epoch_loss / (i + 1)
             pbar.set_postfix(loss=f"{avg_loss:.6f}")

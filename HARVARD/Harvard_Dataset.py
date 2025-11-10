@@ -33,6 +33,20 @@ class harvard_dataset(tud.Dataset):
             self.num = opt.testset_num
             # for testing, you probably want full image-sized crops — keep default
             self.sizeI = 512
+        # simple per-worker cache to avoid repeated slow .mat reads
+        # Each worker process will get its own copy after fork which is desirable.
+        self._cache = {}
+        # Precompute FFT of blur kernel once (numpy complex array) for given patch size
+        sz = [self.sizeI, self.sizeI]
+        try:
+            fft_B, fft_BT = para_setting(getattr(opt, 'kernel_type', 'gaussian_blur'), self.factor, sz, sigma=2.0)
+            # keep numpy complex array for fast numpy.fft usage in workers
+            self._fft_B_np = fft_B
+        except Exception:
+            # fallback: compute on the fly later
+            self._fft_B_np = None
+        # downsample offset used when taking samples after blur
+        self._ds_offset = int(self.factor // 2) - 1
 
     def H_z(self, z, factor, fft_B):
         # z expected as torch tensor [1, C, H, W]
@@ -63,33 +77,41 @@ class harvard_dataset(tud.Dataset):
         hsi_path = os.path.join(self.path, 'HSI', fid + '.mat')
         rgb_path = os.path.join(self.path, 'RGB', fid + '.mat')
 
-        data_h = sio.loadmat(hsi_path)
-        # Harvard uses 'ref' typically; accept either
-        if 'hsi' in data_h:
-            hsi = data_h['hsi']
-        elif 'ref' in data_h:
-            hsi = data_h['ref']
+        # load .mat using cache to avoid repeated disk I/O
+        if fid in self._cache:
+            hsi, rgb = self._cache[fid]
         else:
-            # fallback: find first 3D array
-            hsi = None
-            for v in data_h.values():
-                if isinstance(v, np.ndarray) and v.ndim == 3:
-                    hsi = v
-                    break
-            if hsi is None:
-                raise RuntimeError(f"No 3D HSI array found in {hsi_path}")
-
-        data_r = sio.loadmat(rgb_path)
-        if 'rgb' in data_r:
-            rgb = data_r['rgb']
-        else:
-            # try common alternatives
-            for v in data_r.values():
-                if isinstance(v, np.ndarray) and v.ndim == 3 and v.shape[2] == 3:
-                    rgb = v
-                    break
+            data_h = sio.loadmat(hsi_path)
+            # Harvard uses 'ref' typically; accept either
+            if 'hsi' in data_h:
+                hsi = data_h['hsi']
+            elif 'ref' in data_h:
+                hsi = data_h['ref']
             else:
-                raise RuntimeError(f"No 3-channel RGB found in {rgb_path}")
+                # fallback: find first 3D array
+                hsi = None
+                for v in data_h.values():
+                    if isinstance(v, np.ndarray) and v.ndim == 3:
+                        hsi = v
+                        break
+                if hsi is None:
+                    raise RuntimeError(f"No 3D HSI array found in {hsi_path}")
+
+            data_r = sio.loadmat(rgb_path)
+            if 'rgb' in data_r:
+                rgb = data_r['rgb']
+            else:
+                # try common alternatives
+                for v in data_r.values():
+                    if isinstance(v, np.ndarray) and v.ndim == 3 and v.shape[2] == 3:
+                        rgb = v
+                        break
+                else:
+                    raise RuntimeError(f"No 3-channel RGB found in {rgb_path}")
+            # convert to float32 now and cache
+            hsi = hsi.astype(np.float32)
+            rgb = rgb.astype(np.float32)
+            self._cache[fid] = (hsi, rgb)
 
         # Crop a random patch of size sizeI
         H, W, _ = hsi.shape
@@ -116,20 +138,29 @@ class harvard_dataset(tud.Dataset):
                 hr_hsi = hr_hsi[::-1, :, :].copy()
                 hr_msi = hr_msi[::-1, :, :].copy()
 
-        # convert to torch and compute LR via para_setting + H_z
-        # prepare fft_B
-        sz = [self.sizeI, self.sizeI]
-        fft_B, fft_BT = para_setting('gaussian_blur', self.factor, sz, sigma=2.0)
-        # fft_B is numpy complex; convert to torch complex representation in Dataset
-        fft_B_t = torch.cat((torch.Tensor(np.real(fft_B)).unsqueeze(2), torch.Tensor(np.imag(fft_B)).unsqueeze(2)), 2)
+        # compute LR using numpy FFT (fast on CPU workers) using precomputed fft_B when available
+        if self._fft_B_np is None:
+            # compute on the fly if not precomputed (rare)
+            fft_B_np, _ = para_setting('gaussian_blur', self.factor, [self.sizeI, self.sizeI], sigma=2.0)
+        else:
+            fft_B_np = self._fft_B_np
 
-        hr_hsi_t = torch.FloatTensor(hr_hsi.copy()).permute(2, 0, 1).unsqueeze(0)
-        hr_msi_t = torch.FloatTensor(hr_msi.copy()).permute(2, 0, 1).unsqueeze(0)
+        # hr_hsi: (H, W, C) -> compute per-channel FFT blur and downsample
+        C = hr_hsi.shape[2]
+        out_h = (self.sizeI - self._ds_offset) // self.factor
+        out_w = (self.sizeI - self._ds_offset) // self.factor
+        lr = np.zeros((C, out_h, out_w), dtype=np.float32)
+        for c in range(C):
+            f = np.fft.fft2(hr_hsi[:, :, c])
+            M = f * fft_B_np
+            Hz = np.fft.ifft2(M).real
+            lr_c = Hz[self._ds_offset::self.factor, self._ds_offset::self.factor]
+            lr[c, :lr_c.shape[0], :lr_c.shape[1]] = lr_c.astype(np.float32)
 
-        lr_hsi = self.H_z(hr_hsi_t, self.factor, fft_B_t)
-        lr_hsi = torch.FloatTensor(lr_hsi).squeeze(0)
-        hr_hsi_t = hr_hsi_t.squeeze(0)
-        hr_msi_t = hr_msi_t.squeeze(0)
+        # convert to torch tensors (CHW)
+        hr_hsi_t = torch.from_numpy(hr_hsi.copy()).permute(2, 0, 1).float()
+        hr_msi_t = torch.from_numpy(hr_msi.copy()).permute(2, 0, 1).float()
+        lr_hsi = torch.from_numpy(lr).float()
 
         return lr_hsi, hr_msi_t, hr_hsi_t
 
