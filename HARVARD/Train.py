@@ -129,6 +129,12 @@ if __name__ == '__main__':
     print('AMP enabled:', scaler is not None)
 
     start_epoch = 0
+    best_loss = float('inf')
+    # checkpoint directory (per-scale)
+    ckpt_dir = os.path.join('.', f'Checkpoint/Harvard/f{opt.sf}/Model')
+    os.makedirs(ckpt_dir, exist_ok=True)
+    last_ckpt = os.path.join(ckpt_dir, 'checkpoint_last.pth')
+    best_ckpt = os.path.join(ckpt_dir, 'model_best.pth')
     # resume logic (simple)
     if opt.resume and opt.resume_path and os.path.exists(opt.resume_path):
         print(f"Resuming from: {opt.resume_path}")
@@ -141,6 +147,7 @@ if __name__ == '__main__':
                 except Exception:
                     pass
             start_epoch = int(loaded.get('epoch', 0)) + 1
+            best_loss = float(loaded.get('best_loss', best_loss))
         elif isinstance(loaded, dict):
             try:
                 model.load_state_dict(loaded, strict=False)
@@ -152,6 +159,34 @@ if __name__ == '__main__':
             except Exception:
                 model = loaded
 
+    # auto-resume from last stateful checkpoint if requested and we didn't already resume
+    if opt.resume and start_epoch == 0 and os.path.exists(last_ckpt):
+        try:
+            print(f"Auto-resume from last checkpoint: {last_ckpt}")
+            state = torch.load(last_ckpt, map_location='cpu')
+            if isinstance(state.get('model'), dict):
+                model.load_state_dict(state['model'], strict=False)
+            else:
+                try:
+                    model = state['model']
+                except Exception:
+                    pass
+            if 'optimizer' in state:
+                try:
+                    optimizer.load_state_dict(state['optimizer'])
+                except Exception:
+                    pass
+            start_epoch = int(state.get('epoch', 0)) + 1
+            best_loss = float(state.get('best_loss', best_loss))
+            # try to restore scheduler if present
+            if 'scheduler' in state:
+                try:
+                    scheduler.load_state_dict(state['scheduler'])
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[Warn] Could not auto-resume from last checkpoint: {e}")
+
     print(f"Starting training from epoch {start_epoch} to {opt.epochs}")
 
     for epoch in range(start_epoch, opt.epochs):
@@ -159,41 +194,69 @@ if __name__ == '__main__':
         epoch_loss = 0.0
         start_time = time.time()
         pbar = tqdm(enumerate(loader_train), total=len(loader_train), desc=f"Epoch {epoch+1}/{opt.epochs}")
-        for i, (LR, RGB, HR) in pbar:
-            device = next(model.parameters()).device
-            LR = LR.to(device)
-            RGB = RGB.to(device)
-            HR = HR.to(device)
+        interrupted = False
+        try:
+            for i, (LR, RGB, HR) in pbar:
+                device = next(model.parameters()).device
+                LR = LR.to(device)
+                RGB = RGB.to(device)
+                HR = HR.to(device)
 
-            # use AMP when available
-            if scaler is not None:
-                with torch.cuda.amp.autocast():
+                # use AMP when available
+                if scaler is not None:
+                    with torch.cuda.amp.autocast():
+                        out = model(RGB, LR)
+                        loss = criterion(out, HR)
+                    loss_value = loss.item()
+                    epoch_loss += loss_value
+                    optimizer.zero_grad()
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
                     out = model(RGB, LR)
                     loss = criterion(out, HR)
-                loss_value = loss.item()
-                epoch_loss += loss_value
-                optimizer.zero_grad()
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                out = model(RGB, LR)
-                loss = criterion(out, HR)
-                loss_value = loss.item()
-                epoch_loss += loss_value
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                    loss_value = loss.item()
+                    epoch_loss += loss_value
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
 
-            avg_loss = epoch_loss / (i + 1)
-            pbar.set_postfix(loss=f"{avg_loss:.6f}")
+                avg_loss = epoch_loss / (i + 1)
+                pbar.set_postfix(loss=f"{avg_loss:.6f}")
+        except KeyboardInterrupt:
+            print("\n[Info] Interrupted by user. Saving checkpoint...")
+            torch.save({
+                "epoch": epoch,
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "best_loss": best_loss,
+            }, os.path.join(ckpt_dir, 'checkpoint_interrupt.pth'))
+            interrupted = True
 
+        # Step the scheduler at end-of-epoch
         scheduler.step()
         elapsed_time = time.time() - start_time
+        avg_loss = epoch_loss / max(1, len(loader_train))
         print('epoch = %4d , avg_loss = %.10f , time = %4.2f s , lr = %.6e' % (
-            epoch + 1, epoch_loss / max(1, len(loader_train)), elapsed_time, optimizer.param_groups[0]['lr']))
+            epoch + 1, avg_loss, elapsed_time, optimizer.param_groups[0]['lr']))
 
-        # Save weights-only snapshot
-        ckpt_dir = os.path.join('.', f'Checkpoint/Harvard/f{opt.sf}/Model')
-        os.makedirs(ckpt_dir, exist_ok=True)
+        # Save stateful checkpoint for resume
+        torch.save({
+            "epoch": epoch,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "best_loss": best_loss,
+        }, last_ckpt)
+
+        # Save per-epoch weights-only snapshot and update best
         torch.save(model.state_dict(), os.path.join(ckpt_dir, f'model_{epoch + 1:03d}.pth'))
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            torch.save(model.state_dict(), best_ckpt)
+
+        if interrupted:
+            print("[Info] Training stopped after saving interrupt checkpoint.")
+            break
