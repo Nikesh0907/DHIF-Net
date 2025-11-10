@@ -71,6 +71,12 @@ if __name__ == '__main__':
         torch.cuda.manual_seed(opt.seed)
     except Exception:
         pass
+    # allow cuDNN to autotune for fixed-size inputs (may improve throughput)
+    try:
+        torch.backends.cudnn.benchmark = True
+        print('torch.backends.cudnn.benchmark =', torch.backends.cudnn.benchmark)
+    except Exception:
+        pass
 
     print(opt)
 
@@ -109,11 +115,18 @@ if __name__ == '__main__':
     max_workers = min(8, (os.cpu_count() or 4))
     num_workers = max(1, 4 if torch.cuda.is_available() else 1)
     num_workers = min(num_workers, max_workers)
-    loader_train = tud.DataLoader(dataset, num_workers=num_workers, batch_size=opt.batch_size, shuffle=True)
+    pin_memory = True if torch.cuda.is_available() else False
+    persistent_workers = True if num_workers > 0 else False
+    print(f'Creating DataLoader: num_workers={num_workers}, pin_memory={pin_memory}, persistent_workers={persistent_workers}')
+    loader_train = tud.DataLoader(dataset, num_workers=num_workers, batch_size=opt.batch_size, shuffle=True,
+                                  pin_memory=pin_memory, persistent_workers=persistent_workers)
 
     criterion = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=0.0003, betas=(0.9, 0.999), eps=1e-8)
     scheduler = MultiStepLR(optimizer, milestones=list(range(1,150,5)), gamma=0.95)
+    # Mixed precision (AMP) scaler when CUDA is available
+    scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
+    print('AMP enabled:', scaler is not None)
 
     start_epoch = 0
     # resume logic (simple)
@@ -152,12 +165,25 @@ if __name__ == '__main__':
             RGB = RGB.to(device)
             HR = HR.to(device)
 
-            out = model(RGB, LR)
-            loss = criterion(out, HR)
-            epoch_loss += loss.item()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # use AMP when available
+            if scaler is not None:
+                with torch.cuda.amp.autocast():
+                    out = model(RGB, LR)
+                    loss = criterion(out, HR)
+                loss_value = loss.item()
+                epoch_loss += loss_value
+                optimizer.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                out = model(RGB, LR)
+                loss = criterion(out, HR)
+                loss_value = loss.item()
+                epoch_loss += loss_value
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
             avg_loss = epoch_loss / (i + 1)
             pbar.set_postfix(loss=f"{avg_loss:.6f}")
