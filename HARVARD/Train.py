@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'CAVE')))
 from Model import HSI_Fusion
-from Utils import loadpath
+from Utils import loadpath, dataparallel
 from Harvard_Dataset import harvard_dataset
 
 try:
@@ -54,8 +54,23 @@ if __name__ == '__main__':
     opt = parser.parse_args()
 
     print('Random Seed: ', opt.seed)
+    # Configure visible GPUs BEFORE any cuda calls (match CAVE behavior)
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    if opt.gpus is not None and opt.gpus > 0:
+        try:
+            ids = ",".join(str(i) for i in range(opt.gpus))
+            os.environ["CUDA_VISIBLE_DEVICES"] = ids
+        except Exception:
+            pass
+    # quick runtime visibility logs (help debug GPU usage)
+    print('CUDA_VISIBLE_DEVICES ->', os.environ.get('CUDA_VISIBLE_DEVICES'))
+
     random.seed(opt.seed)
     torch.manual_seed(opt.seed)
+    try:
+        torch.cuda.manual_seed(opt.seed)
+    except Exception:
+        pass
 
     print(opt)
 
@@ -63,7 +78,14 @@ if __name__ == '__main__':
     print('===> New Model')
     model = HSI_Fusion(Ch=31, stages=4, sf=opt.sf)
     print('===> Setting GPU')
+    # Use the repository dataparallel helper (sets cuda and wraps DataParallel)
     model = dataparallel(model, opt.gpus)
+    # report actual CUDA availability and device count after wrapper
+    print('torch.cuda.is_available():', torch.cuda.is_available())
+    try:
+        print('torch.cuda.device_count():', torch.cuda.device_count())
+    except Exception:
+        pass
 
     # Initialize weights (same logic as original)
     for layer in model.modules():
@@ -82,7 +104,12 @@ if __name__ == '__main__':
 
     # Dataset uses on-the-fly loader
     dataset = harvard_dataset(opt, file_list, opt.data_path)
-    loader_train = tud.DataLoader(dataset, num_workers=1, batch_size=opt.batch_size, shuffle=True)
+    # increase num_workers to speed up data loading when GPUs are available
+    # cap workers to a reasonable number so it works in constrained environments
+    max_workers = min(8, (os.cpu_count() or 4))
+    num_workers = max(1, 4 if torch.cuda.is_available() else 1)
+    num_workers = min(num_workers, max_workers)
+    loader_train = tud.DataLoader(dataset, num_workers=num_workers, batch_size=opt.batch_size, shuffle=True)
 
     criterion = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=0.0003, betas=(0.9, 0.999), eps=1e-8)
