@@ -106,6 +106,14 @@ except Exception:
     file_path = os.path.join(opt.data_path, 'Train.txt')
     if not os.path.exists(file_path):
         print(f"Train list not found in data_path: {file_path}")
+        # Help the user debug by listing the provided data_path contents (if accessible)
+        try:
+            print('Provided data_path:', opt.data_path)
+            print('Top-level contents:')
+            for p in sorted(os.listdir(opt.data_path)):
+                print('  ', p)
+        except Exception as e:
+            print('Could not list data_path contents:', repr(e))
         raise SystemExit(1)
     file_list = loadpath(file_path)
 
