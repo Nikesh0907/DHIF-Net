@@ -27,6 +27,7 @@ parser.add_argument("--sf", default=8, type=int, help='Scaling factor')
 parser.add_argument("--seed", default=1, type=int, help='Random seed')
 parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Kernel type')
 parser.add_argument("--ckpt_path", default="", type=str, help="Path to a checkpoint .pth (overrides auto selection)")
+parser.add_argument('--debug', action='store_true', help='Print per-sample debug stats (min/max/mean/mse)')
 opt = parser.parse_args()
 print(opt)
 
@@ -112,6 +113,15 @@ for j, (LR, RGB, HR) in enumerate(loader_test):
         result = out.clamp(min=0., max=1.)
     res_np = result.cpu().detach().numpy()
     hr_np = HR.numpy()
+    if opt.debug:
+        try:
+            import numpy as _np
+            res_flat = _np.asarray(res_np).ravel()
+            hr_flat = _np.asarray(hr_np).ravel()
+            mse = _np.mean((res_flat - hr_flat) ** 2)
+            print(f'[DEBUG] sample {j}: res_min={res_flat.min():.6f} res_max={res_flat.max():.6f} hr_min={hr_flat.min():.6f} hr_max={hr_flat.max():.6f} mse={mse:.6e}')
+        except Exception as _e:
+            print('[DEBUG] could not compute debug stats:', _e)
     res_np = ensure_chw_numpy(np.squeeze(res_np))
     hr_np = ensure_chw_numpy(np.squeeze(hr_np))
     psnr = compare_psnr(hr_np, res_np, data_range=1.0)

@@ -31,8 +31,10 @@ class harvard_dataset(tud.Dataset):
             self.sizeI = opt.sizeI
         else:
             self.num = opt.testset_num
-            # for testing, you probably want full image-sized crops — keep default
-            self.sizeI = 512
+            # for testing, by default we use a 512 crop (historical CAVE default).
+            # To run full-image evaluation on Harvard, pass --sizeI 0 to the test script
+            # and the dataset will return full-resolution images for testing.
+            self.sizeI = opt.sizeI if hasattr(opt, 'sizeI') else 512
 
     def H_z(self, z, factor, fft_B):
         # z expected as torch tensor [1, C, H, W]
@@ -91,15 +93,22 @@ class harvard_dataset(tud.Dataset):
             else:
                 raise RuntimeError(f"No 3-channel RGB found in {rgb_path}")
 
-        # Crop a random patch of size sizeI
+        # If sizeI==0 and this is testing, return the full image (no crop)
         H, W, _ = hsi.shape
-        if H < self.sizeI or W < self.sizeI:
-            raise RuntimeError(f"Image {fid} smaller than patch size {self.sizeI}: {hsi.shape}")
+        if not self.istrain and self.sizeI == 0:
+            hr_hsi = hsi.copy()
+            hr_msi = rgb.copy()
+            cur_size_h, cur_size_w = H, W
+        else:
+            # Crop a random patch of size sizeI
+            if H < self.sizeI or W < self.sizeI:
+                raise RuntimeError(f"Image {fid} smaller than patch size {self.sizeI}: {hsi.shape}")
 
-        px = random.randint(0, H - self.sizeI)
-        py = random.randint(0, W - self.sizeI)
-        hr_hsi = hsi[px:px + self.sizeI, py:py + self.sizeI, :].copy()
-        hr_msi = rgb[px:px + self.sizeI, py:py + self.sizeI, :].copy()
+            px = random.randint(0, H - self.sizeI)
+            py = random.randint(0, W - self.sizeI)
+            hr_hsi = hsi[px:px + self.sizeI, py:py + self.sizeI, :].copy()
+            hr_msi = rgb[px:px + self.sizeI, py:py + self.sizeI, :].copy()
+            cur_size_h, cur_size_w = hr_hsi.shape[0], hr_hsi.shape[1]
 
         # Data augmentation for training
         if self.istrain:
@@ -117,8 +126,8 @@ class harvard_dataset(tud.Dataset):
                 hr_msi = hr_msi[::-1, :, :].copy()
 
         # convert to torch and compute LR via para_setting + H_z
-        # prepare fft_B
-        sz = [self.sizeI, self.sizeI]
+        # prepare fft_B; use actual current size (supports full-image test when sizeI==0)
+        sz = [cur_size_h, cur_size_w]
         fft_B, fft_BT = para_setting('gaussian_blur', self.factor, sz, sigma=2.0)
         # fft_B is numpy complex; convert to torch complex representation in Dataset
         fft_B_t = torch.cat((torch.Tensor(np.real(fft_B)).unsqueeze(2), torch.Tensor(np.imag(fft_B)).unsqueeze(2)), 2)
