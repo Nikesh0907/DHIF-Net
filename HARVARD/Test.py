@@ -20,7 +20,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 parser = argparse.ArgumentParser(description="PyTorch Test for Harvard HSI Fusion")
 parser.add_argument('--data_path', default='./Data/Test/', type=str, help='path of the testing data (expects HSI/ and RGB/ under this folder)')
-parser.add_argument("--sizeI", default=512, type=int, help='the size of test crops')
+# Default to full-image evaluation for Harvard; set --sizeI>0 to test on center crops deterministically
+parser.add_argument("--sizeI", default=0, type=int, help='the size of test crops (0 = full image)')
 parser.add_argument("--testset_num", default=12, type=int, help='total number of test samples')
 parser.add_argument("--batch_size", default=1, type=int, help='Batch size')
 parser.add_argument("--sf", default=8, type=int, help='Scaling factor')
@@ -120,6 +121,20 @@ for j, (LR, RGB, HR) in enumerate(loader_test):
             hr_flat = _np.asarray(hr_np).ravel()
             mse = _np.mean((res_flat - hr_flat) ** 2)
             print(f'[DEBUG] sample {j}: res_min={res_flat.min():.6f} res_max={res_flat.max():.6f} hr_min={hr_flat.min():.6f} hr_max={hr_flat.max():.6f} mse={mse:.6e}')
+            # Bicubic baseline for reference when debugging
+            try:
+                from skimage.transform import resize as _resize
+                res_chw = ensure_chw_numpy(np.squeeze(res_np))
+                hr_chw = ensure_chw_numpy(np.squeeze(hr_np))
+                # upsample LR to HR size per band
+                lr_chw = ensure_chw_numpy(np.squeeze(LR.numpy()))
+                C,H,W = hr_chw.shape
+                lr_up = np.stack([_resize(lr_chw[c], (H,W), order=3, preserve_range=True, anti_aliasing=True) for c in range(C)], axis=0)
+                psnr_b = compare_psnr(hr_chw, lr_up, data_range=1.0)
+                ssim_b = compute_ssim(hr_chw, lr_up, data_range=1.0)
+                print(f'[DEBUG] Bicubic(LR↑) baseline: PSNR={psnr_b:.4f} dB SSIM={ssim_b:.6f}')
+            except Exception as _e2:
+                print('[DEBUG] bicubic baseline skipped:', _e2)
         except Exception as _e:
             print('[DEBUG] could not compute debug stats:', _e)
     res_np = ensure_chw_numpy(np.squeeze(res_np))

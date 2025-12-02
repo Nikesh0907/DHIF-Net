@@ -100,12 +100,16 @@ class harvard_dataset(tud.Dataset):
             hr_msi = rgb.copy()
             cur_size_h, cur_size_w = H, W
         else:
-            # Crop a random patch of size sizeI
+            # Crop a patch of size sizeI. For testing, use deterministic center crop to avoid randomness.
             if H < self.sizeI or W < self.sizeI:
                 raise RuntimeError(f"Image {fid} smaller than patch size {self.sizeI}: {hsi.shape}")
 
-            px = random.randint(0, H - self.sizeI)
-            py = random.randint(0, W - self.sizeI)
+            if self.istrain:
+                px = random.randint(0, H - self.sizeI)
+                py = random.randint(0, W - self.sizeI)
+            else:
+                px = (H - self.sizeI) // 2
+                py = (W - self.sizeI) // 2
             hr_hsi = hsi[px:px + self.sizeI, py:py + self.sizeI, :].copy()
             hr_msi = rgb[px:px + self.sizeI, py:py + self.sizeI, :].copy()
             cur_size_h, cur_size_w = hr_hsi.shape[0], hr_hsi.shape[1]
