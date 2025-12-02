@@ -29,6 +29,9 @@ parser.add_argument("--seed", default=1, type=int, help='Random seed')
 parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Kernel type')
 parser.add_argument("--ckpt_path", default="", type=str, help="Path to a checkpoint .pth (overrides auto selection)")
 parser.add_argument('--debug', action='store_true', help='Print per-sample debug stats (min/max/mean/mse)')
+parser.add_argument('--cpu', action='store_true', help='Force CPU inference to avoid CUDA OOM')
+parser.add_argument('--tile', default=0, type=int, help='Enable tiled inference with given tile size (e.g., 512). 0 disables tiling.')
+parser.add_argument('--tile_overlap', default=16, type=int, help='Overlap between tiles to reduce seams')
 opt = parser.parse_args()
 print(opt)
 
@@ -100,7 +103,7 @@ else:
     model.load_state_dict(state, strict=False)
 
 model = model.eval()
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() and not opt.cpu else 'cpu')
 model = model.to(device)
 
 psnr_total = 0.0
@@ -108,9 +111,47 @@ sam_total = 0.0
 ergas_total = 0.0
 ssim_total = 0.0
 k = 0
+def _tiled_forward(model, RGB, LR, tile, overlap):
+    # RGB: [B,3,H,W], LR: [B,C,H/sf,W/sf]? Here both match HR crop/full sizes per dataset.
+    # We tile on HR spatial size using RGB as guide. Assumes B=1.
+    assert RGB.dim() == 4 and LR.dim() == 4 and RGB.size(0) == 1 and LR.size(0) == 1
+    _, _, H, W = RGB.shape
+    if tile <= 0 or tile >= max(H, W):
+        return model(RGB, LR)
+    stride = tile - overlap
+    out_tiles = []
+    coords = []
+    for y in range(0, H, stride):
+        for x in range(0, W, stride):
+            y0 = y
+            x0 = x
+            y1 = min(y0 + tile, H)
+            x1 = min(x0 + tile, W)
+            # adjust start if at border to keep tile size
+            y0 = max(0, y1 - tile)
+            x0 = max(0, x1 - tile)
+            rgb_patch = RGB[:, :, y0:y1, x0:x1]
+            lr_patch  = LR[:, :, y0:y1, x0:x1]
+            out_patch = model(rgb_patch, lr_patch)
+            out_tiles.append(out_patch)
+            coords.append((y0, y1, x0, x1))
+    # stitch
+    out_full = torch.zeros_like(RGB[:, :1, :, :]).repeat(1, out_tiles[0].size(1), 1, 1)
+    weight   = torch.zeros_like(out_full)
+    for (out_patch, (y0, y1, x0, x1)) in zip(out_tiles, coords):
+        out_full[:, :, y0:y1, x0:x1] += out_patch
+        weight[:, :, y0:y1, x0:x1] += 1.0
+    out_full = out_full / torch.clamp(weight, min=1.0)
+    return out_full
+
 for j, (LR, RGB, HR) in enumerate(loader_test):
     with torch.no_grad():
-        out = model(RGB.to(device), LR.to(device))
+        RGBd = RGB.to(device)
+        LRd  = LR.to(device)
+        if opt.tile and opt.tile > 0:
+            out = _tiled_forward(model, RGBd, LRd, tile=opt.tile, overlap=opt.tile_overlap)
+        else:
+            out = model(RGBd, LRd)
         result = out.clamp(min=0., max=1.)
     res_np = result.cpu().detach().numpy()
     hr_np = HR.numpy()
