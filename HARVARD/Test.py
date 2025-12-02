@@ -30,6 +30,7 @@ parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Ke
 parser.add_argument("--ckpt_path", default="", type=str, help="Path to a checkpoint .pth (overrides auto selection)")
 parser.add_argument('--debug', action='store_true', help='Print per-sample debug stats (min/max/mean/mse)')
 parser.add_argument('--cpu', action='store_true', help='Force CPU inference to avoid CUDA OOM')
+parser.add_argument('--fp16', action='store_true', help='Use mixed precision (FP16) on GPU to reduce memory')
 opt = parser.parse_args()
 print(opt)
 
@@ -103,6 +104,8 @@ else:
 model = model.eval()
 device = torch.device('cuda' if torch.cuda.is_available() and not opt.cpu else 'cpu')
 model = model.to(device)
+if device.type == 'cuda':
+    torch.backends.cudnn.benchmark = True
 
 if opt.sizeI == 0:
     print('[INFO] Full-image evaluation enabled (sizeI=0). This may OOM on GPU; use --sizeI 512 if needed.')
@@ -114,12 +117,19 @@ ssim_total = 0.0
 k = 0
 total = len(loader_test)
 
+use_autocast = (device.type == 'cuda' and opt.fp16)
 for j, (LR, RGB, HR) in enumerate(loader_test):
     with torch.no_grad():
         RGBd = RGB.to(device)
         LRd  = LR.to(device)
-        out = model(RGBd, LRd)
+        if use_autocast:
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                out = model(RGBd, LRd)
+        else:
+            out = model(RGBd, LRd)
         result = out.clamp(min=0., max=1.)
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
     res_np = result.cpu().detach().numpy()
     hr_np = HR.numpy()
     if opt.debug:
