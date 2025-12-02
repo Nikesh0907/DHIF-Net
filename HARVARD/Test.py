@@ -20,8 +20,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 parser = argparse.ArgumentParser(description="PyTorch Test for Harvard HSI Fusion")
 parser.add_argument('--data_path', default='./Data/Test/', type=str, help='path of the testing data (expects HSI/ and RGB/ under this folder)')
-# Default to full-image evaluation for Harvard; set --sizeI>0 to test on center crops deterministically
-parser.add_argument("--sizeI", default=0, type=int, help='the size of test crops (0 = full image)')
+# Harvard default: full-image evaluation; pass --sizeI 512 to use center-crop like CAVE
+parser.add_argument("--sizeI", default=0, type=int, help='0 = full-image evaluation; >0 = center-crop size')
 parser.add_argument("--testset_num", default=12, type=int, help='total number of test samples')
 parser.add_argument("--batch_size", default=1, type=int, help='Batch size')
 parser.add_argument("--sf", default=8, type=int, help='Scaling factor')
@@ -30,8 +30,6 @@ parser.add_argument("--kernel_type", default='gaussian_blur', type=str, help='Ke
 parser.add_argument("--ckpt_path", default="", type=str, help="Path to a checkpoint .pth (overrides auto selection)")
 parser.add_argument('--debug', action='store_true', help='Print per-sample debug stats (min/max/mean/mse)')
 parser.add_argument('--cpu', action='store_true', help='Force CPU inference to avoid CUDA OOM')
-parser.add_argument('--tile', default=0, type=int, help='Enable tiled inference with given tile size (e.g., 512). 0 disables tiling.')
-parser.add_argument('--tile_overlap', default=16, type=int, help='Overlap between tiles to reduce seams')
 opt = parser.parse_args()
 print(opt)
 
@@ -106,52 +104,21 @@ model = model.eval()
 device = torch.device('cuda' if torch.cuda.is_available() and not opt.cpu else 'cpu')
 model = model.to(device)
 
+if opt.sizeI == 0:
+    print('[INFO] Full-image evaluation enabled (sizeI=0). This may OOM on GPU; use --sizeI 512 if needed.')
+
 psnr_total = 0.0
 sam_total = 0.0
 ergas_total = 0.0
 ssim_total = 0.0
 k = 0
-def _tiled_forward(model, RGB, LR, tile, overlap):
-    # RGB: [B,3,H,W], LR: [B,C,H/sf,W/sf]? Here both match HR crop/full sizes per dataset.
-    # We tile on HR spatial size using RGB as guide. Assumes B=1.
-    assert RGB.dim() == 4 and LR.dim() == 4 and RGB.size(0) == 1 and LR.size(0) == 1
-    _, _, H, W = RGB.shape
-    if tile <= 0 or tile >= max(H, W):
-        return model(RGB, LR)
-    stride = tile - overlap
-    out_tiles = []
-    coords = []
-    for y in range(0, H, stride):
-        for x in range(0, W, stride):
-            y0 = y
-            x0 = x
-            y1 = min(y0 + tile, H)
-            x1 = min(x0 + tile, W)
-            # adjust start if at border to keep tile size
-            y0 = max(0, y1 - tile)
-            x0 = max(0, x1 - tile)
-            rgb_patch = RGB[:, :, y0:y1, x0:x1]
-            lr_patch  = LR[:, :, y0:y1, x0:x1]
-            out_patch = model(rgb_patch, lr_patch)
-            out_tiles.append(out_patch)
-            coords.append((y0, y1, x0, x1))
-    # stitch
-    out_full = torch.zeros_like(RGB[:, :1, :, :]).repeat(1, out_tiles[0].size(1), 1, 1)
-    weight   = torch.zeros_like(out_full)
-    for (out_patch, (y0, y1, x0, x1)) in zip(out_tiles, coords):
-        out_full[:, :, y0:y1, x0:x1] += out_patch
-        weight[:, :, y0:y1, x0:x1] += 1.0
-    out_full = out_full / torch.clamp(weight, min=1.0)
-    return out_full
+total = len(loader_test)
 
 for j, (LR, RGB, HR) in enumerate(loader_test):
     with torch.no_grad():
         RGBd = RGB.to(device)
         LRd  = LR.to(device)
-        if opt.tile and opt.tile > 0:
-            out = _tiled_forward(model, RGBd, LRd, tile=opt.tile, overlap=opt.tile_overlap)
-        else:
-            out = model(RGBd, LRd)
+        out = model(RGBd, LRd)
         result = out.clamp(min=0., max=1.)
     res_np = result.cpu().detach().numpy()
     hr_np = HR.numpy()
@@ -189,6 +156,7 @@ for j, (LR, RGB, HR) in enumerate(loader_test):
     ergas_total += ergas
     ssim_total += ssim
     k = k + 1
+    print(f"Processed {j+1}/{total}")
 
 print(k)
 print("Avg PSNR  = %.4f" % (psnr_total/k))
